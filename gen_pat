@@ -1,0 +1,87 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+
+my $illegal = '\*?['; # rsync wildcard characters not allowed
+
+my $dbl_suffix = '.__@';
+
+
+my $x_flag = 0;
+
+my $argc = @ARGV;
+
+foreach my $argnum (0 .. $argc - 1) {
+
+   if ($ARGV[$argnum] eq "-x") {
+      $x_flag = 1;
+   }
+   else {
+      die("unknown argument \"$ARGV[$argnum]\"");
+   }
+
+}
+
+
+
+my %bupname = ();
+my %prefixdir = ();
+
+while (my $line = <STDIN>) {
+   chomp $line;
+
+   if ($line ne "") { # skip blank lines
+
+      # check for wierd names
+      my $name = "/$line/";
+      if ( $name =~ m{[$illegal]} || $name =~ m{//} ) { 
+         die("funny file name \"$line\"");
+      }
+
+      $bupname{$line} = 0;
+
+   }
+}
+
+
+### generate prefix directories
+
+for my $name (keys %bupname) {
+   $prefixdir{$name} = 0;
+   while ( $name =~ m{(.*)/.*} ) {
+      $name = $1;
+      $prefixdir{$name} = 0;
+   }
+}
+
+### write exclude patterns for data
+
+for my $name (keys %prefixdir) {
+   print "+ /$name\n";
+}
+
+for my $name (keys %bupname) {
+   print "+ /$name/**\n";
+}
+
+if ($x_flag == 1) {
+
+   print "+ /.$dbl_suffix\n";
+
+   for my $name (keys %prefixdir) {
+      print "+ /$name/.$dbl_suffix\n";
+   }
+
+   for my $name (keys %bupname) {
+      $name = "/$name";
+      $name =~ m{(.*)/(.*)};
+      $name = "$1/$2$dbl_suffix";
+      print "+ $name\n";
+   }
+
+}
+
+
+print "- *\n";
+

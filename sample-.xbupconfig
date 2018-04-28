@@ -1,0 +1,107 @@
+
+###### Configuration file for xbup
+
+###### required variables:
+
+$SRC='/Volumes/unix-files/u';
+   # source directory, containg the files you want backed up
+
+$RHOST='shoup@access.cims.nyu.edu';  
+   # remote host name (ssh syntax), where you want to backup your files
+
+$DST='/home/shoup/back';  
+   # destination directory on remote host, where files will be backed up
+   # data files will be stored in $DST/data, and xattr containers
+   # in $DST/xattr
+
+$BIN='/Users/shoup/bin';     
+   # directory containing of xattr tools
+
+$TEMP='/Volumes/unix-files/u-backup-temp.noindex';
+   # directory for storage of various xbup scratch files
+   # best to use the .noindex suffix to avoid spotlight indexing
+   # should be on the same --- or same type of --- filesystem as $SRC
+   # in particular, if $SRC is on a case sensistive filesystem,
+   #   then so should $TEMP
+
+
+###### optional setings:
+
+$NDAYS='30';  
+   # archive backups of modifications/deletions for this many days
+   # set to '-' for no acrchives
+   # archived backups are stored in $DST/archive
+
+$RSYNC='rsync';   
+   # rsync command
+
+$SAVE_CRTIME='no';  
+   # save crtime (creation time)? yes/no
+   # this will cause an xattr container to be generated
+   #   for every file 
+
+$LNK_MTIME='no';
+   # save mtime (modification time) for symbolic links? yes/no
+
+$LNK_PERMS='no';
+   # save perms for symbolic links? yes/no
+
+$FIX_PERMS='no'; 
+   # fix problematic permissions? yes/no
+   # this will cause split_xattr to be called with the --fixperms option
+   #   and the outbound data rsync to be called with the option
+   #   --chmod=u+rw,u-s,g-s,-t,Du+x
+   # requires rsync version 2.6.7 or later
+
+$SAVE_ACL='no'; 
+   # preserve ACLs? yes/no
+
+$SAVE_OWNER='no';
+   # preserve owner? yes/no
+
+$DEF_OWNER='-';
+   # default owner: '-' means no default
+   # if most files have the owner, you can avoid generating
+   #   xattr containers for these by setting the default owner
+
+$SAVE_GROUP='no';
+   # save group? yes/no
+
+$DEF_GROUP='-';
+   # default group: '-' means no default
+   # if most files have the group, you can avoid generating
+   #   xattr containers for these by setting the default group
+
+$SSH_ARGS='';
+   # extra args for ssh
+   # Tip: set this to '-i /Users/yourname/.ssh/id_rsa'
+   # if you run xbup using sudo; otherwise, ssh will not
+   # find your secret key
+
+
+##########################################
+
+##### the following are for real low-level fine tuning
+
+#### extra rsync args....
+
+$RSYNC_ARGS_DO=''; 
+   # outbound data
+
+$RSYNC_ARGS_DI=''; 
+   # inbound data
+
+$RSYNC_ARGS_XO=''; 
+   # outbound xattrs
+
+$RSYNC_ARGS_XI=''; 
+   # inbound xattrs
+ 
+####
+
+$SPLIT_ARGS=''; 
+   # extra args for split_xattr
+
+$JOIN_ARGS=''; 
+   # extra args for join_xattr
+

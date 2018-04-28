@@ -1,0 +1,62 @@
+
+# make_directory works much like mkdir -p, but will not follow symlinks
+
+make_directory_aux() {
+   if [[ -L "$1" ]]; then echo "mkdir: failed to create $1"; return -1; fi
+   if [[ ! -d "$1" ]] 
+   then
+      if ! mkdir "$1" ; then return -1; fi
+      echo "mkdir: created $1" 
+   fi
+   return 0
+}
+
+make_directory() {
+   local base="$1"
+   local ext="$2"
+   local head
+
+   make_directory_aux "$base" || return -1
+
+   if [[ "$ext" == "" ]]; then return 0; fi 
+   ext="${ext#/}/"
+
+   while [[ "$ext" != "" ]]
+   do
+      head=${ext%%/*}
+      ext=${ext#*/}
+      base="$base/$head"
+      make_directory_aux "$base" || return -1
+   done
+   return 0
+}
+
+#### start of script
+
+# check for global directory structure
+
+make_directory "$DST" "/data" || exit 1
+make_directory "$DST" "/xattr" || exit 1
+make_directory "$DST" "/archive" || exit 1
+
+
+# check for local directory structure
+
+make_directory "$DST" "/data$ext" || exit 1
+make_directory "$DST" "/xattr$ext" || exit 1
+
+
+if test "$NDAYS" '!=' '-'
+then
+
+   # remove old backups
+   
+   ( cd "$DST/archive" && find . \! -name '.' -prune -name 'arch.*' -mtime "+$NDAYS" -exec rm -rf {} \; )
+   
+   # create backup directory structure
+
+   make_directory "$DST" "/archive/arch.$timestamp" || exit 1
+   
+fi
+
+exit 0

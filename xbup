@@ -1,0 +1,696 @@
+#!/usr/bin/perl
+
+# For backing up files on an HFS+ partition to a remote Unix host
+
+# usage: xbup options
+#  
+# options: --local              make effective backup directory the
+#                               current working directory, rather than the
+#                               root of the backup tree
+# 
+#          --files              backup only those files and directories
+#                               listed in .bupfiles (located in the
+#                               effective backup directory)
+#   
+#          --files-from file    like --files, but use specified file
+#                               instead of .bupfiles
+#                 
+#          --config file        read config from file, instead of ~/.xbupconfig
+#
+#          --checksum           always checksum data files
+#                               by default, no transfer occurs if
+#                               modtime agrees.  Note that xattr containers
+#                               are always checksummed.
+#
+#          --dry-run            just a dry run
+#                               tip: use --checksum --dry-rum
+#                               to compare source and destination
+#
+#          --restore            restores files, instead of backing them up
+#
+
+use warnings;
+use strict;
+use Cwd;
+
+
+sub ptsystem {
+   print "$_[0]\n";
+   return system("time $_[0]");
+}
+
+sub psystem {
+   print "$_[0]\n";
+   return system("$_[0]");
+}
+
+# umask 000; # makes files and directories created by xbup a bit more accessible
+             # useful if xbup is sometimes run as root
+
+my $QwQ = "'\\''"; # quote within a quote -- for shell invocations
+my $illegal = "'";  # only disallow single quotes
+
+
+
+######################### 
+
+### command line options
+
+my $files_flag = 0;
+my $local_flag = 0;
+my $config_flag = 0;
+my $files_from_flag = 0;
+my $restore_flag = 0;
+my $dry_run_flag = 0;
+my $checksum_flag = 0;
+
+my $user_xbupconfig;
+my $user_bupfiles;
+
+my $argc = @ARGV;
+
+foreach my $argnum (0 .. $argc - 1) {
+
+   if ($config_flag == -1) {
+      $user_xbupconfig = $ARGV[$argnum];
+      $config_flag = 1;
+   }
+   elsif ($files_from_flag == -1) {
+      $user_bupfiles = $ARGV[$argnum];
+      $files_flag = 1;
+      $files_from_flag = 1;
+   }
+   elsif ($ARGV[$argnum] eq "--files") {
+      $files_flag = 1;
+   }
+   elsif ($ARGV[$argnum] eq "--local") {
+      $local_flag = 1;
+   }
+   elsif ($ARGV[$argnum] eq "--config") {
+      $config_flag = -1;
+   }
+   elsif ($ARGV[$argnum] eq "--files-from") {
+      $files_from_flag = -1;
+   }
+   elsif ($ARGV[$argnum] eq "--restore") {
+      $restore_flag = 1;
+   }
+   elsif ($ARGV[$argnum] eq "--dry-run") {
+      $dry_run_flag = 1;
+   }
+   elsif ($ARGV[$argnum] eq "--checksum") {
+      $checksum_flag = 1;
+   }
+   else {
+      die("unknown argument \"$ARGV[$argnum]\"");
+   }
+}
+
+if ($config_flag == -1) { die("dangling --config option"); }
+if ($files_from_flag == -1) { die("dangling --files-from option"); }
+
+my $dry_run_arg = "";
+if ($dry_run_flag == 1) {
+   $dry_run_arg = "--dry-run";
+}
+
+my $checksum_arg = "";
+if ($checksum_flag == 1) {
+   $checksum_arg = "--checksum";
+}
+
+
+
+######## config variables
+
+# These need to be defined
+
+my $RSYNC="???";   
+my $BIN="???";     
+my $TEMP="???"; 
+my $SRC="???";  
+my $RHOST="???";  
+my $DST="???";  
+my $RBIN="???";  # keep this for backward compatibility
+my $NDAYS="???";  
+
+# These are optional...initialize default values
+
+my $SAVE_CRTIME="no";
+my $LNK_MTIME="no";
+my $LNK_PERMS="no";
+my $FIX_PERMS="no";
+my $SAVE_ACL="no";
+my $SAVE_OWNER="no";
+my $DEF_OWNER="-";
+my $SAVE_GROUP="no";
+my $DEF_GROUP="-";
+
+my $SSH_ARGS="";
+
+my $RSYNC_ARGS_DO="";
+my $RSYNC_ARGS_DI="";
+my $RSYNC_ARGS_XO="";
+my $RSYNC_ARGS_XI="";
+my $SPLIT_ARGS="";
+my $JOIN_ARGS="";
+
+
+#########
+
+my $xbupconfig;
+
+if ($config_flag == 1) {
+   $xbupconfig = $user_xbupconfig;
+}
+else {
+   $xbupconfig="$ENV{HOME}/.xbupconfig";
+}
+
+open(F, "<",  "$xbupconfig") or die("can't open \"$xbupconfig\"");
+my $config_code = do { local $/; <F> };
+close F;
+
+eval $config_code;
+
+if ($@ ne "") { die("error processing \"$xbupconfig\": $@"); }
+
+if ($RSYNC eq "???" || $BIN eq "???" || $TEMP eq "???" || $SRC eq "???" 
+ || $RHOST eq "???" || $DST eq "???" || $NDAYS eq "???" ) {
+   die("error processing \"$xbupconfig\": some variables undefined");
+}
+
+
+#########################
+
+#### initial sanity checking and cleaning
+
+# first, strip trailing slashes
+
+$DST =~ s{(.)/*$}{$1};
+$SRC =~ s{(.)/*$}{$1};
+$TEMP =~ s{(.)/*$}{$1};
+$BIN =~ s{(.)/*$}{$1};
+
+# second, check for funny names
+
+
+if ( $RSYNC =~ m{[$illegal]} || $RSYNC eq "" ) { 
+   die("rsync \"$RSYNC\" has a funny name");
+}
+
+if ( $BIN =~ m{[$illegal]} || !($BIN =~ m{^/}) ) { 
+   die("temp directory \"$BIN\" has a funny name");
+}
+
+if ( $TEMP =~ m{[$illegal]} ||  !($TEMP =~ m{^/}) ) { 
+   die("temp directory \"$TEMP\" has a funny name");
+}
+
+if ( $SRC =~ m{[$illegal]} ||  !($SRC =~ m{^/}) ) { 
+   die("source directory \"$SRC\" has a funny name");
+}
+
+
+if ( $DST =~ m{[$illegal]} ||  !($DST =~ m{^/}) ) { 
+   die("destination directory \"$DST\" has a funny name");
+}
+
+if ( $RHOST =~ m{[$illegal]} || $RHOST eq "" ) { 
+   die("remote host \"$RHOST\" has a funny name");
+}
+
+
+
+if ( ($NDAYS =~ m{[^0-9]} && $NDAYS ne "-") || $NDAYS eq "" ) { 
+   die("num days \"$NDAYS\" has funny characters");
+}
+
+
+if (! (!(-l $TEMP) && -d $TEMP) ) {
+
+   print "***** creating $TEMP\n";
+
+   mkdir($TEMP) or die("failed to create \"$TEMP\"");
+
+}
+
+if (! (!(-l $SRC) && -d $SRC)) {
+   die("source directory \"$SRC\" does not exist");
+}
+
+
+if (! (!(-l $BIN) && -d $BIN)) {
+   die("binaries directory \"$BIN\" does not exist");
+}
+
+
+##### special handling of root directory:
+
+my $HEAD;
+
+$HEAD = $SRC;
+if ($HEAD eq "/") {
+   $HEAD = "";
+}
+
+
+#########################
+
+####### process optional config params
+
+
+# SAVE_CRTIME
+
+my $crtime_flag = "";
+
+if ($SAVE_CRTIME ne "yes" && $SAVE_CRTIME ne "no") {
+   die("bad SAVE_CRTIME: $SAVE_CRTIME");
+}
+
+if ($SAVE_CRTIME eq "yes") {
+   $crtime_flag = "--crtime";
+}
+
+# LNK_MTIME
+
+my $lnkmtime_flag = "";
+
+if ($LNK_MTIME ne "yes" && $LNK_MTIME ne "no") {
+   die("bad LNK_MTIME: $LNK_MTIME");
+}
+
+if ($LNK_MTIME eq "yes") {
+   $lnkmtime_flag = "--lnkmtime";
+}
+
+# LNK_PERMS
+
+my $lnkperms_flag = "";
+
+if ($LNK_PERMS ne "yes" && $LNK_PERMS ne "no") {
+   die("bad LNK_PERMS: $LNK_PERMS");
+}
+
+if ($LNK_PERMS eq "yes") {
+   $lnkperms_flag = "--lnkperms";
+}
+
+
+# FIX_PERMS
+
+my $fixperms_flag = "";
+my $rsync_fixperms_flag = "";
+
+if ($FIX_PERMS ne "yes" && $FIX_PERMS ne "no") {
+   die("bad FIX_PERMS: $FIX_PERMS");
+}
+
+if ($FIX_PERMS eq "yes") {
+   $fixperms_flag = "--fixperms";
+   $rsync_fixperms_flag = "--chmod=u+rw,u-s,g-s,-t,Du+x";
+}
+
+# SAVE_ACL
+
+my $acl_flag = "";
+
+if ($SAVE_ACL ne "yes" && $SAVE_ACL ne "no") {
+   die("bad SAVE_ACL: $SAVE_ACL");
+}
+
+if ($SAVE_ACL eq "yes") {
+   $acl_flag = "--acl";
+}
+
+# SAVE_OWNER
+
+my $owner_flag = "";
+
+if ($SAVE_OWNER ne "yes" && $SAVE_OWNER ne "no") {
+   die("bad SAVE_OWNER: $SAVE_OWNER");
+}
+
+if ( $DEF_OWNER =~ m{[$illegal]} || $DEF_OWNER eq "" ) { 
+   die("default owner \"$DEF_OWNER\" has a funny name");
+}
+
+if ($SAVE_OWNER eq "yes") {
+   $owner_flag = "--owner '$DEF_OWNER'";
+}
+
+
+
+
+# SAVE_GROUP
+
+my $group_flag = "";
+
+if ($SAVE_GROUP ne "yes" && $SAVE_GROUP ne "no") {
+   die("bad SAVE_GROUP: $SAVE_GROUP");
+}
+
+if ( $DEF_GROUP =~ m{[$illegal]} || $DEF_GROUP eq "" ) { 
+   die("default group \"$DEF_GROUP\" has a funny name");
+}
+
+if ($SAVE_GROUP eq "yes") {
+   $group_flag = "--group '$DEF_GROUP'";
+}
+
+
+
+#########################
+
+
+my $rsync_args = "--rsh='ssh $SSH_ARGS' --stats -vzrlpt --delete";
+   # general rsync options
+
+my $xrsync_args = "--rsh='ssh $SSH_ARGS' --stats -vzrl --checksum --delete";
+   # options used to backup xattr containers.
+   # Don't prerseve modtimes or permissions, and always checksum.
+   # This ensures modtimes on remote host reflect when the xattr
+   # container was really created or modified, and enables accurate
+   # restores of xattrs from the backup archive.
+
+#########################
+
+####### process local flag
+
+my $effdir;
+my $ext;
+
+if ($local_flag == 1) {
+   $effdir = ".";
+
+   my $pwd = getcwd;
+
+   if ( $pwd =~ m{[$illegal]} ) { 
+      die("current directory \"$pwd\" has a funny name");
+   }
+
+   $ext = "$pwd/";
+   $ext =~ s{^$HEAD/}{/}  
+      or die("current directory \"$pwd\" not a subdirectory of \"$SRC\"");
+   $ext =~ s{/*$}{};
+}
+else {
+   $effdir = $SRC;
+   $ext = "";
+}
+
+
+
+#########################
+
+##### process --files flag
+#####
+##### This is tricky -- especially to get the patterns just right
+##### for the xattr container files
+
+my $exclude_arg = "";
+my $xexclude_arg = "";
+my $files_arg = "";
+
+
+if ($files_flag == 1) {
+
+
+   my $bupfiles="$effdir/.bupfiles";
+   if ($files_from_flag == 1) {
+      $bupfiles = $user_bupfiles;
+   }
+
+   if ( $bupfiles =~ m{[$illegal]} || $bupfiles eq "" ) { 
+      die("bupfiles \"$bupfiles\" has a funny name");
+   }
+
+   if (system("cat '$bupfiles' > '$TEMP/bupfiles'")) {
+      die("error reading \"$bupfiles\"");
+   }
+
+   if (system("'$BIN/gen_pat' < '$TEMP/bupfiles' > '$TEMP/pat'")) {
+      die("error processing \"$bupfiles\"");
+   }
+
+   if (system("'$BIN/gen_pat' -x < '$TEMP/bupfiles' > '$TEMP/xpat'")) {
+      die("error processing \"$bupfiles\"");
+   }
+
+   $exclude_arg = "--exclude-from='$TEMP/pat'";
+   $xexclude_arg = "--exclude-from='$TEMP/xpat'";
+   $files_arg = "--files-from '$TEMP/bupfiles'";
+
+}
+
+
+
+if ($restore_flag == 0) {
+
+############################
+############################
+
+##### perform backup
+
+
+
+############################
+
+##### generate UTC timestamp and set up files on remote host
+
+
+my $timestamp=`date -u '+GMT%Y-%m-%d-%H-%M-%S'`;
+chomp $timestamp;
+
+print "***** xbup_helper:";
+print "  DST='$DST'";
+print "  ext='$ext'";
+print "  timestamp='$timestamp'";
+print "  NDAYS='$NDAYS'\n";
+
+if (system("echo 'DST=${QwQ}$DST${QwQ}' > '$TEMP/helper_script'") ||
+  system("echo 'ext=${QwQ}$ext${QwQ}' >> '$TEMP/helper_script'") ||
+  system("echo 'timestamp=${QwQ}$timestamp${QwQ}' >> '$TEMP/helper_script'") ||
+  system("echo 'NDAYS=${QwQ}$NDAYS${QwQ}' >> '$TEMP/helper_script'") ||
+  system("cat '$BIN/xbup_helper' >> '$TEMP/helper_script'"))  {
+
+   die("problem generating \"$TEMP/helper_script\"");
+}
+
+if (ptsystem("ssh $SSH_ARGS '$RHOST' bash <  '$TEMP/helper_script'")) {
+   exit;
+}
+
+
+my $backup_arg = "";
+my $xbackup_arg = "";
+
+if ($NDAYS ne "-") {
+
+   $backup_arg = "-b --backup-dir='${QwQ}$DST/archive/arch.$timestamp/data$ext${QwQ}'";
+   $xbackup_arg = "-b --backup-dir='${QwQ}$DST/archive/arch.$timestamp/xattr$ext${QwQ}'";
+
+}
+   
+
+
+
+#############################
+
+####### sync data
+
+print "\n***** syncing files\n\n";
+
+my $opt_rsync_args = "$dry_run_arg $exclude_arg $checksum_arg $backup_arg " .
+                     "$rsync_fixperms_flag $RSYNC_ARGS_DO";
+
+
+ptsystem("'$RSYNC' $rsync_args $opt_rsync_args '$effdir/' '$RHOST:${QwQ}$DST/data$ext${QwQ}'");
+
+
+##############################
+
+####### split xattrs
+
+print "\n***** splitting xattrs\n\n";
+
+psystem("rm -rf '$TEMP/xattr'");
+
+my $opt_split_args = "$crtime_flag $lnkmtime_flag $lnkperms_flag " .
+                     "$fixperms_flag " .
+                     "$acl_flag $owner_flag $group_flag $files_arg $SPLIT_ARGS";
+
+if (ptsystem("'$BIN/split_xattr' $opt_split_args '$effdir' '$TEMP/xattr'")) {
+   die("error in split_xattr -- backup not complete");
+}
+
+
+###############################
+
+####### sync xattrs
+   
+
+print "\n***** syncing xattrs\n\n";
+
+my $opt_xrsync_args = "$dry_run_arg $xexclude_arg $xbackup_arg $RSYNC_ARGS_XO";
+
+
+ptsystem("'$RSYNC' $xrsync_args $opt_xrsync_args '$TEMP/xattr/' '$RHOST:${QwQ}$DST/xattr$ext${QwQ}'");
+
+
+
+}
+else {
+
+############################
+############################
+
+##### perform restore
+
+my $response;
+
+print "***** preparing to restore to \"$HEAD$ext\"\n";
+
+if ($files_flag == 1) {
+   print "pruning using file list: $files_arg\n";
+}
+
+if ($dry_run_flag == 1) {
+   print "this is a dry run\n";
+}
+
+print "...continue? [yn] ";
+$response = <STDIN>;
+chop $response;
+
+
+while ($response ne "y" && $response ne "n") {
+
+   print "continue? [yn] ";
+   $response = <STDIN>;
+   chop $response;
+
+}
+
+if ($response eq "n") {
+
+   print "goodbye\n";
+   exit;
+
+}
+
+
+
+##### check for files on remote host
+
+print "***** xbup_helper:";
+print "  DST='$DST'";
+print "  ext='$ext'";
+print "  timestamp='-'";
+print "  NDAYS='-'\n";
+
+
+if (system("echo 'DST=${QwQ}$DST${QwQ}' > '$TEMP/helper_script'") ||
+  system("echo 'ext=${QwQ}$ext${QwQ}' >> '$TEMP/helper_script'") ||
+  system("echo 'timestamp=${QwQ}-${QwQ}' >> '$TEMP/helper_script'") ||
+  system("echo 'NDAYS=${QwQ}-${QwQ}' >> '$TEMP/helper_script'") ||
+  system("cat '$BIN/xbup_helper' >> '$TEMP/helper_script'"))  {
+
+   die("problem generating \"$TEMP/helper_script\"");
+}
+
+
+if (ptsystem("ssh $SSH_ARGS '$RHOST' bash <  '$TEMP/helper_script'")) {
+   exit;
+}
+
+
+#############################
+
+####### strip locks
+
+
+if ($dry_run_flag == 0) {
+   print "\n***** stripping locks\n\n";
+   ptsystem("'$BIN/strip_locks' $files_arg $acl_flag '$effdir'");
+}
+else {
+   print "\n***** dry run: locks not stripped\n\n";
+}
+
+
+#############################
+
+####### sync data
+
+
+
+
+print "\n***** syncing files\n\n";
+
+my $opt_rsync_args = "$dry_run_arg $exclude_arg $checksum_arg $RSYNC_ARGS_DI";
+
+ptsystem("'$RSYNC' $rsync_args $opt_rsync_args '$RHOST:${QwQ}$DST/data$ext/${QwQ}' '$effdir/'");
+
+###############################
+
+####### sync xattrs
+   
+
+print "\n***** syncing xattrs\n\n";
+psystem("rm -rf '$TEMP/xattr'");
+mkdir("$TEMP/xattr") or die("failed to make \"$TEMP/xattr\"");
+
+
+my $opt_xrsync_args = "$dry_run_arg $xexclude_arg $RSYNC_ARGS_XI";
+
+ptsystem("'$RSYNC' $rsync_args $opt_xrsync_args '$RHOST:${QwQ}$DST/xattr$ext/${QwQ}' '$TEMP/xattr/'");
+
+# relax permissions on xattr directory...sometimes helpful
+# when running as root
+
+# system("chmod -R ugo+rwX '$TEMP/xattr'");
+
+
+##############################
+
+####### join xattrs
+
+if ($dry_run_flag == 0) {
+
+   print "\n***** ready to restore xattrs\n";
+
+   print "...continue? [yn] ";
+   $response = <STDIN>;
+   chop $response;
+
+   while ($response ne "y" && $response ne "n") {
+
+      print "continue? [yn] ";
+      $response = <STDIN>;
+      chop $response;
+
+   }
+
+   if ($response eq "n") {
+
+      print "xattrs not restored\n";
+      exit;
+
+   }
+
+   print "\n***** joining xattrs\n\n";
+
+
+   my $opt_join_args = "$acl_flag $owner_flag $group_flag $files_arg $JOIN_ARGS";
+
+   if (ptsystem("'$BIN/join_xattr' $opt_join_args '$effdir' '$TEMP/xattr'")) {
+      die("error in join_xattr -- restore may not be complete");
+   }
+}
+else {
+   print "\n***** dry run: xattrs not restored\n\n";
+}
+
+
+}
